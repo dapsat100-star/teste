@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
+import streamlit.components.v1 as components
 import os, time
 
 # ================== Config & CSS ==================
@@ -264,7 +265,7 @@ with tab2:
         )
         st.altair_chart(bars, use_container_width=True)
 
-# --- Mapas (Mapbox OFF + troca garantida com cache-buster)
+# --- Mapas (Mapbox OFF + troca garantida com cache-buster) — render HTML standalone
 with tab3:
     st.markdown('<div class="section-title"><span class="dot"></span> Mapa dos Sites</div>', unsafe_allow_html=True)
     if data.empty:
@@ -332,8 +333,14 @@ with tab3:
             map_style=None,
         )
 
-        # recria o widget sempre (evita reaproveitar estado antigo)
-        st.empty().pydeck_chart(deck)
+        # Render deck.gl como HTML standalone (sem Mapbox)
+        html = deck.to_html(
+            as_string=True,
+            notebook_display=False,
+            iframe_height=560,
+            mapbox_key=""        # força SEM mapbox
+        )
+        components.html(html, height=560)
 
 # --- Alertas
 with tab4:
@@ -362,4 +369,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.markdown('<div class="footer">© DAP Sistemas Espaciais · Demo POC · deck.gl via PyDeck · tiles Esri.</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">© DAP Sistemas Espaciais · Demo POC · deck.gl (TileLayer Esri) renderizado como HTML standalone.</div>', unsafe_allow_html=True)
