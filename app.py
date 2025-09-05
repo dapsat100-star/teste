@@ -464,40 +464,60 @@ with tab3:
         st_folium(m, height=560, use_container_width=True)
 
 # --- 🚨 Alertas
+# --- 🚨 Alertas
 with tab4:
     st.markdown('<div class="section-title"><span class="dot"></span> Regras de alerta</div>', unsafe_allow_html=True)
+
     if data.empty:
         st.info("Seleção sem dados.")
     else:
         limiar = st.number_input("Limiar de Taxa Metano", value=50.0, step=1.0)
         consecutivos = st.slider("Pontos consecutivos acima do limiar (histerese)", 1, 5, 1, 1)
 
-        ult = (
-            data[data["parameter"] == "Taxa Metano"]
-            .sort_values(["site","date"])
-            .copy()
-        )
-
-        # Sinaliza consecutivos por site
-        def _consec(g):
-            g["acima"] = (g["value"] >= limiar).astype(int)
-            # contador de streaks
-            streak = []
-            c = 0
-            for v in g["acima"]:
-                c = c + 1 if v == 1 else 0
-                streak.append(c)
-            g["streak"] = streak
-            return g
-
-        ult = ult.groupby("site", group_keys=False).apply(_consec)
-        alertas = ult[ult["streak"] >= consecutivos].groupby("site").tail(1)[["site","value","date"]].sort_values("value", ascending=False)
-
-        if alertas.empty:
-            st.success("Nenhum alerta no momento ✅")
+        # 1) Garante que a métrica existe no filtro atual
+        if "Taxa Metano" not in set(data["parameter"].unique()):
+            st.info("Não há registros de **Taxa Metano** no recorte selecionado.")
         else:
-            st.error(f"{len(alertas)} site(s) acima do limiar")
-            st.dataframe(alertas, use_container_width=True)
+            # 2) Base ordenada por site/data
+            base = (
+                data[data["parameter"] == "Taxa Metano"]
+                .sort_values(["site", "date"])
+                .loc[:, ["site", "date", "value"]]
+                .copy()
+            )
+
+            if base.empty:
+                st.success("Nenhum alerta no momento ✅")
+            else:
+                # 3) Conta streaks por site com retorno sempre contendo 'streak'
+                def _consec(g):
+                    acima = (g["value"] >= float(limiar)).astype(int).to_list()
+                    streak = []
+                    c = 0
+                    for v in acima:
+                        c = c + 1 if v == 1 else 0
+                        streak.append(c)
+                    return g.assign(acima=acima, streak=streak)
+
+                ult = base.groupby("site", group_keys=False).apply(_consec)
+
+                # 4) Se por algum motivo ainda estiver vazio, termina limpo
+                if ult.empty or "streak" not in ult.columns:
+                    st.success("Nenhum alerta no momento ✅")
+                else:
+                    # Considera o último ponto de cada site que atingiu o limiar de consecutivos
+                    atingiu = ult[ult["streak"] >= int(consecutivos)]
+                    if atingiu.empty:
+                        st.success("Nenhum alerta no momento ✅")
+                    else:
+                        alertas = (
+                            atingiu.groupby("site", as_index=False)
+                            .tail(1)[["site", "value", "date"]]
+                            .sort_values("value", ascending=False)
+                        )
+                        st.error(f"{len(alertas)} site(s) acima do limiar")
+                        st.dataframe(alertas, use_container_width=True)
+
 
 # --- 🔗 Correlação
 with tab5:
