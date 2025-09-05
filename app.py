@@ -337,8 +337,7 @@ with tab3:
         html = deck.to_html(
             as_string=True,
             notebook_display=False,
-            iframe_height=560,
-            mapbox_key=""        # força SEM mapbox
+            iframe_height=560
         )
         components.html(html, height=560)
 
