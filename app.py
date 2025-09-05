@@ -267,23 +267,37 @@ with tab3:
     if data.empty:
         st.info("Seleção sem dados.")
     else:
+        # --- prepara dados e view ---
         sites_df = data.groupby(["site", "lat", "lon"], as_index=False).size()
-
         view_state = pdk.ViewState(
             latitude=sites_df["lat"].mean(),
             longitude=sites_df["lon"].mean(),
             zoom=4, pitch=0,
         )
 
+        # --- cache-buster pra trocar basemap de verdade ---
+        if "bm_last" not in st.session_state:
+            st.session_state.bm_last = None
+        if "bm_buster" not in st.session_state:
+            st.session_state.bm_buster = "init"
+
+        if bm_id != st.session_state.bm_last:
+            import time
+            st.session_state.bm_last = bm_id
+            st.session_state.bm_buster = str(int(time.time()))  # muda a cada troca
+
+        buster = st.session_state.bm_buster
+
+        # URL muda quando o basemap muda -> força deck.gl a recarregar os tiles
         esri_url = (
             f"https://server.arcgisonline.com/ArcGIS/rest/services/"
-            f"{bm_id}/MapServer/tile/{{z}}/{{y}}/{{x}}?fresh={bm_id}"
+            f"{bm_id}/MapServer/tile/{{z}}/{{y}}/{{x}}?fresh={buster}"
         )
 
         esri_layer = pdk.Layer(
             "TileLayer",
-            id=f"esri-{bm_id}",          # muda com o basemap -> rebuild
-            data=[{"bm": bm_id}],        # payload muda -> deck.gl refaz a layer
+            id=f"esri-{bm_id}-{buster}",   # id único a cada troca
+            data=[{"bm": bm_id, "b": buster}],  # payload muda -> força rebuild
             get_tile_url=esri_url,
         )
 
@@ -303,7 +317,7 @@ with tab3:
             heat = data[data["parameter"] == "Taxa Metano"].rename(columns={"lon":"longitude","lat":"latitude"})
             heat_layer = pdk.Layer(
                 "HeatmapLayer",
-                id=f"heat-{bm_id}",
+                id=f"heat-{bm_id}-{buster}",
                 data=heat,
                 get_position='[longitude, latitude]',
                 get_weight="value",
@@ -315,12 +329,14 @@ with tab3:
             initial_view_state=view_state,
             layers=layers,
             tooltip={"text": "{site}"},
-            map_style=None,
+            map_style=None,  # sem Mapbox
         )
 
-        # 🔧 key sempre como string (evita TypeError)
-        st.pydeck_chart(deck)
+        # sem key (sua versão não aceita); usamos cache-buster para garantir troca
+        placeholder = st.empty()
+        placeholder.pydeck_chart(deck)
 
+    
 # --- Alertas
 with tab4:
     st.markdown('<div class="section-title"><span class="dot"></span> Regras de alerta</div>', unsafe_allow_html=True)
