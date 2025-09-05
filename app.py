@@ -4,44 +4,40 @@ import pydeck as pdk
 from datetime import datetime
 import os
 
-# ----------------- Config / CSS -----------------
+# ================== Config & CSS ==================
 st.set_page_config(page_title="DAP Atlas – Methane POC", page_icon="🛰️", layout="wide")
 
 def load_css():
     # tenta assets/styles.css; se não, tenta styles.css na raiz
-    css_paths = ["assets/styles.css", "styles.css"]
-    loaded = False
-    for p in css_paths:
+    for p in ("assets/styles.css", "styles.css"):
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-            loaded = True
-            break
-    if not loaded:
-        # CSS fallback (tema escuro básico) caso nenhum arquivo exista
-        fallback = """
-        .block-container { padding-top: 1.2rem; }
-        body, .stMarkdown, .stText, .stApp { color:#E5E7EB!important; background:#0B1220!important; }
-        section[data-testid="stSidebar"] { background:#121A2B!important; border-right:1px solid rgba(255,255,255,.06); }
-        .topbar {display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,rgba(14,165,164,.12),rgba(14,165,164,.04));
-                 border:1px solid rgba(255,255,255,.06); padding:10px 14px; border-radius:14px; margin-bottom:14px;}
-        .topbar h1{font-size:1.05rem;margin:0;color:#E5E7EB}
-        .kpi-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-        .kpi{background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.03));
-             border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px 16px;box-shadow:0 6px 22px rgba(0,0,0,.2)}
-        .kpi .label{font-size:.8rem;color:#A7B0BF;margin-bottom:6px}
-        .kpi .value{font-size:1.4rem;font-weight:700;color:#F9FAFB}
-        .kpi .sub{font-size:.78rem;color:#8FA3B8}
-        .section-title{display:flex;align-items:center;gap:8px;margin:18px 0 8px;color:#E5E7EB;font-weight:600}
-        .section-title .dot{width:8px;height:8px;border-radius:50%;background:#0EA5A4;display:inline-block}
-        [data-testid="stDataFrame"]{border:1px solid rgba(255,255,255,.08);border-radius:12px;overflow:hidden}
-        .footer{margin-top:12px;font-size:.78rem;color:#8FA3B8;border-top:1px dashed rgba(255,255,255,.12);padding-top:8px}
-        """
-        st.markdown(f"<style>{fallback}</style>", unsafe_allow_html=True)
+            return
+    # fallback (tema escuro básico)
+    fallback = """
+    .block-container { padding-top: 1.2rem; }
+    body, .stMarkdown, .stText, .stApp { color:#E5E7EB!important; background:#0B1220!important; }
+    section[data-testid="stSidebar"] { background:#121A2B!important; border-right:1px solid rgba(255,255,255,.06); }
+    .topbar {display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,rgba(14,165,164,.12),rgba(14,165,164,.04));
+             border:1px solid rgba(255,255,255,.06); padding:10px 14px; border-radius:14px; margin-bottom:14px;}
+    .topbar h1{font-size:1.05rem;margin:0;color:#E5E7EB}
+    .kpi-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+    .kpi{background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.03));
+         border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px 16px;box-shadow:0 6px 22px rgba(0,0,0,.2)}
+    .kpi .label{font-size:.8rem;color:#A7B0BF;margin-bottom:6px}
+    .kpi .value{font-size:1.4rem;font-weight:700;color:#F9FAFB}
+    .kpi .sub{font-size:.78rem;color:#8FA3B8}
+    .section-title{display:flex;align-items:center;gap:8px;margin:18px 0 8px;color:#E5E7EB;font-weight:600}
+    .section-title .dot{width:8px;height:8px;border-radius:50%;background:#0EA5A4;display:inline-block}
+    [data-testid="stDataFrame"]{border:1px solid rgba(255,255,255,.08);border-radius:12px;overflow:hidden}
+    .footer{margin-top:12px;font-size:.78rem;color:#8FA3B8;border-top:1px dashed rgba(255,255,255,.12);padding-top:8px}
+    """
+    st.markdown(f"<style>{fallback}</style>", unsafe_allow_html=True)
 
 load_css()
 
-# ----------------- Data loading -----------------
+# ================== Load & Transform ==================
 @st.cache_data
 def load_excel(path_or_buffer):
     xlsx = pd.ExcelFile(path_or_buffer)
@@ -85,10 +81,10 @@ def to_tidy(sheets_dict):
     tidy.sort_values(["site", "parameter", "date"], inplace=True)
     return tidy
 
-# ----------------- Sidebar -----------------
+# ================== Sidebar ==================
 st.sidebar.header("⚙️ Configurações")
 
-default_path = "exemplo banco dados.xlsx"   # se você versionou um exemplo
+default_path = "exemplo banco dados.xlsx"   # se versionou um exemplo
 uploaded = st.sidebar.file_uploader("Suba o Excel (12 abas, mesmo layout)", type=["xlsx"])
 path = uploaded if uploaded is not None else default_path
 
@@ -111,15 +107,17 @@ start, end = st.sidebar.date_input(
     "📅 Intervalo de datas", value=(min_d, max_d), min_value=min_d, max_value=max_d
 )
 
-basemaps = {
+# basemap selector + ids (usaremos na key/id pra forçar refresh)
+BASEMAPS = {
     "Esri Streets": "World_Street_Map",
     "Esri Satellite": "World_Imagery",
     "Esri Topo": "World_Topo_Map",
 }
-bm = st.sidebar.selectbox("🗺️ Basemap", list(basemaps))
+bm_name = st.sidebar.selectbox("🗺️ Basemap", list(BASEMAPS))
+bm_id = BASEMAPS[bm_name]  # usado no id/key
 show_heat = st.sidebar.checkbox("Heatmap (Taxa Metano)", value=False)
 
-# ----------------- Filtro -----------------
+# ================== Filter ==================
 filt = (
     data["site"].isin(sel_sites)
     & data["parameter"].isin(sel_params)
@@ -127,11 +125,8 @@ filt = (
 )
 data = data.loc[filt].copy()
 
-# ----------------- Topbar + KPIs -----------------
-st.markdown(
-    '<div class="topbar"><h1>DAP Atlas – Methane & Metocean · 12 Sites</h1></div>',
-    unsafe_allow_html=True,
-)
+# ================== Header & KPIs ==================
+st.markdown('<div class="topbar"><h1>DAP Atlas – Methane & Metocean · 12 Sites</h1></div>', unsafe_allow_html=True)
 
 def kpi_grid():
     obs = f"{len(data):,}".replace(",", ".")
@@ -156,9 +151,10 @@ def kpi_grid():
 
 kpi_grid()
 
-# ----------------- Abas -----------------
+# ================== Tabs ==================
 tab1, tab2, tab3, tab4 = st.tabs(["📈 Tendência", "🏁 Ranking", "🗺️ Mapas", "🚨 Alertas"])
 
+# --- Tendência temporal
 with tab1:
     st.markdown('<div class="section-title"><span class="dot"></span> Série temporal</div>', unsafe_allow_html=True)
     if data.empty:
@@ -185,6 +181,7 @@ with tab1:
         )
         st.altair_chart(chart, use_container_width=True)
 
+# --- Ranking
 with tab2:
     st.markdown('<div class="section-title"><span class="dot"></span> Ranking por métrica</div>', unsafe_allow_html=True)
     if data.empty:
@@ -208,6 +205,7 @@ with tab2:
         )
         st.altair_chart(bars, use_container_width=True)
 
+# --- Mapas (força refresh do basemap com id/key)
 with tab3:
     st.markdown('<div class="section-title"><span class="dot"></span> Mapa dos Sites</div>', unsafe_allow_html=True)
     if data.empty:
@@ -219,37 +217,51 @@ with tab3:
             longitude=sites_df["lon"].mean(),
             zoom=4, pitch=0,
         )
+
         esri_layer = pdk.Layer(
-            "TileLayer", data=None,
-            get_tile_url=f"https://server.arcgisonline.com/ArcGIS/rest/services/{basemaps[bm]}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+            "TileLayer",
+            id=f"esri-{bm_id}",  # id único por basemap -> força rebuild
+            data=None,
+            get_tile_url=(
+                f"https://server.arcgisonline.com/ArcGIS/rest/services/"
+                f"{bm_id}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+            ),
         )
+
         points_layer = pdk.Layer(
             "ScatterplotLayer",
+            id="sites-points",
             data=sites_df.rename(columns={"lon":"longitude","lat":"latitude"}),
             get_position="[longitude, latitude]",
             get_radius=15000,
             get_fill_color=[255, 0, 0, 160],
             pickable=True,
         )
-        deck_layers = [esri_layer, points_layer]
+
+        layers = [esri_layer, points_layer]
 
         if show_heat and "Taxa Metano" in data["parameter"].unique():
             heat = data[data["parameter"] == "Taxa Metano"].rename(columns={"lon":"longitude","lat":"latitude"})
             heat_layer = pdk.Layer(
                 "HeatmapLayer",
+                id=f"heat-{bm_id}",  # id também muda com basemap
                 data=heat,
                 get_position='[longitude, latitude]',
                 get_weight="value",
                 radiusPixels=40,
             )
-            deck_layers = [esri_layer, heat_layer, points_layer]
+            layers = [esri_layer, heat_layer, points_layer]
 
-        st.pydeck_chart(pdk.Deck(
+        deck = pdk.Deck(
             initial_view_state=view_state,
-            layers=deck_layers,
-            tooltip={"text": "{site}"}
-        ))
+            layers=layers,
+            tooltip={"text": "{site}"},
+            map_style=None,  # evita estilo do Mapbox
+        )
+        # key muda com o basemap -> garante rerender no Streamlit
+        st.pydeck_chart(deck, key=f"deck-{bm_id}")
 
+# --- Alertas
 with tab4:
     st.markdown('<div class="section-title"><span class="dot"></span> Regras de alerta</div>', unsafe_allow_html=True)
     if data.empty:
@@ -268,7 +280,7 @@ with tab4:
             st.error(f"{len(alertas)} site(s) acima do limiar")
             st.dataframe(alertas, use_container_width=True)
 
-# ----------------- Export -----------------
+# --- Export
 st.download_button(
     "⬇️ Baixar CSV filtrado (seleção atual)",
     data.to_csv(index=False).encode("utf-8"),
