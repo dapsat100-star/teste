@@ -3,3 +3,6 @@ pydeck==0.9.1
 pandas==2.2.2
 altair==5.3.0
 openpyxl==3.1.5
+streamlit-folium==0.20.0
+folium==0.16.0
+
