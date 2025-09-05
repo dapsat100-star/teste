@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
-import os, sys, traceback
+import os, time
 
 # ================== Config & CSS ==================
 st.set_page_config(page_title="DAP Atlas – Methane POC", page_icon="🛰️", layout="wide")
@@ -12,7 +12,7 @@ def load_css():
             with open(p, "r", encoding="utf-8") as f:
                 st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
             return
-    # fallback (tema escuro básico)
+    # Fallback (tema escuro básico)
     st.markdown("""
     <style>
     .block-container{padding-top:1.2rem}
@@ -36,18 +36,23 @@ def load_css():
 
 load_css()
 
-# ================== Util: diagnóstico ==================
-with st.expander("🔧 Diagnóstico (versões)"):
-    import platform
-    st.write("Python:", sys.version)
-    try:
-        import pandas, pydeck, altair, openpyxl
-        st.write("pandas", pandas.__version__, "| pydeck", pydeck.__version__, "| altair", altair.__version__, "| openpyxl", openpyxl.__version__)
-    except Exception as e:
-        st.write("Erro ao checar versões:", e)
+# ================== Utils (parser robusto) ==================
+def _pick_col(df: pd.DataFrame, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    norm = {str(c).strip().lower(): c for c in df.columns}
+    for c in candidates:
+        key = str(c).strip().lower()
+        if key in norm:
+            return norm[key]
+    return None
 
-# ================== Load & Transform ==================
-@st.cache_data
+def _to_float(cell):
+    return float(str(cell).replace(",", ".").strip())
+
+# ================== Load & Transform (com cache) ==================
+@st.cache_data(ttl=900, max_entries=4)
 def load_excel(path_or_buffer):
     xlsx = pd.ExcelFile(path_or_buffer)
     frames = []
@@ -57,35 +62,68 @@ def load_excel(path_or_buffer):
     return {sh: df for sh, df in frames}
 
 def parse_sheet(df: pd.DataFrame, site: str) -> pd.DataFrame:
+    lat_col = _pick_col(df, ["Lat", "Latitude", "LAT"])
+    lon_col = _pick_col(df, ["Long", "Lon", "Longitude", "LONG"])
+    if lat_col is None or lon_col is None:
+        raise ValueError(f"Aba '{site}': faltam colunas Lat/Long.")
+
     cols = list(df.columns)
-    start_idx = cols.index("Data")
+    start_idx = cols.index("Data") if "Data" in cols else None
+    if start_idx is None:
+        for i, c in enumerate(cols):
+            cell = df.iloc[0, i] if 0 in df.index else None
+            if pd.to_datetime(cell, errors="coerce") is not pd.NaT:
+                start_idx = i
+                break
+    if start_idx is None:
+        raise ValueError(f"Aba '{site}': não identifiquei as colunas de data.")
+
     date_cols = cols[start_idx:]
-    dates = pd.to_datetime(df.loc[0, date_cols], errors="coerce")
-    lat = float(df.loc[0, "Lat"])
-    lon = float(df.loc[0, "Long"])
+    dates = pd.to_datetime(df.loc[df.index[0], date_cols], errors="coerce")
+    if dates.isna().all():
+        raise ValueError(f"Aba '{site}': cabeçalho de datas inválido.")
+
+    par_col = _pick_col(df, ["Parametro", "Parâmetro", "parametro", "parameter"])
+    if par_col is None:
+        raise ValueError(f"Aba '{site}': não encontrei a coluna de parâmetro.")
+
+    try:
+        lat = _to_float(df.loc[df.index[0], lat_col])
+        lon = _to_float(df.loc[df.index[0], lon_col])
+    except Exception:
+        raise ValueError(f"Aba '{site}': Lat/Long da linha 0 não numéricos.")
+
     value_rows = df.iloc[1:].copy().reset_index(drop=True)
     recs = []
     for _, row in value_rows.iterrows():
-        param = str(row["Parametro"]).strip()
+        param = str(row[par_col]).strip()
+        if not param or param.lower() in ("nan", "none"):
+            continue
         for i, c in enumerate(date_cols):
             d = dates.iloc[i]
-            v = row[c]
+            v = row.get(c, None)
             if pd.isna(d) or pd.isna(v):
                 continue
             recs.append({
                 "site": site, "lat": lat, "lon": lon,
                 "parameter": param, "date": pd.to_datetime(d),
-                "value": pd.to_numeric(v, errors="coerce"),
+                "value": pd.to_numeric(str(v).replace(",", "."), errors="coerce"),
             })
-    return pd.DataFrame(recs)
+    out = pd.DataFrame(recs)
+    if out.empty:
+        raise ValueError(f"Aba '{site}': nenhum valor válido após parse.")
+    return out
 
-def to_tidy(sheets_dict):
+@st.cache_data(ttl=900, max_entries=4)
+def to_tidy_cached(sheets_dict):
     parts = []
     for sh, df in sheets_dict.items():
         try:
             parts.append(parse_sheet(df, sh))
         except Exception as e:
-            st.warning(f"Falha ao processar a aba '{sh}': {e}")
+            st.warning(f"⚠️ {e}")
+    if not parts:
+        raise RuntimeError("Nenhuma aba válida após o parse.")
     tidy = pd.concat(parts, ignore_index=True)
     tidy.sort_values(["site", "parameter", "date"], inplace=True)
     return tidy
@@ -93,22 +131,30 @@ def to_tidy(sheets_dict):
 # ================== Sidebar & Data ==================
 st.sidebar.header("⚙️ Configurações")
 
-default_path = "exemplo banco dados.xlsx"   # se você versionou um exemplo
 uploaded = st.sidebar.file_uploader("Suba o Excel (12 abas, mesmo layout)", type=["xlsx"])
-path = uploaded if uploaded is not None else (default_path if os.path.exists(default_path) else None)
-
-if path is None:
+default_example = "exemplo banco dados.xlsx"
+if uploaded is None and not os.path.exists(default_example):
     st.info("⬅️ Envie o arquivo .xlsx no sidebar (ou inclua 'exemplo banco dados.xlsx' no repositório).")
     st.stop()
+path = uploaded if uploaded is not None else default_example
 
-try:
+t0 = time.perf_counter()
+with st.spinner("Carregando planilha..."):
     sheets_dict = load_excel(path)
-    data = to_tidy(sheets_dict)
-except Exception as e:
-    st.error("Falha ao carregar/transformar a planilha.")
-    st.exception(e)
-    st.stop()
+t1 = time.perf_counter()
+with st.spinner("Transformando dados..."):
+    data = to_tidy_cached(sheets_dict)
+t2 = time.perf_counter()
+st.caption(f"⏱️ Tempo: load {t1-t0:.2f}s · transform {t2-t1:.2f}s")
 
+with st.expander("🧪 Debug – estrutura da planilha"):
+    st.write("Abas:", list(sheets_dict.keys()))
+    for sh, df in list(sheets_dict.items())[:3]:
+        st.write(f"**Aba:** {sh}")
+        st.write("Colunas:", list(df.columns))
+        st.dataframe(df.head(5), use_container_width=True)
+
+# ================== Filtros ==================
 sites = sorted(data["site"].unique())
 params = sorted(data["parameter"].unique())
 
@@ -120,17 +166,15 @@ start, end = st.sidebar.date_input(
     "📅 Intervalo de datas", value=(min_d, max_d), min_value=min_d, max_value=max_d
 )
 
-# Basemap selector (ids Esri)
 BASEMAPS = {
     "Esri Streets": "World_Street_Map",
     "Esri Satellite": "World_Imagery",
     "Esri Topo": "World_Topo_Map",
 }
 bm_name = st.sidebar.selectbox("🗺️ Basemap", list(BASEMAPS))
-bm_id = BASEMAPS[bm_name]
+bm_id = BASEMAPS[bm_name]  # sempre string
 show_heat = st.sidebar.checkbox("Heatmap (Taxa Metano)", value=False)
 
-# ================== Filter ==================
 filt = (
     data["site"].isin(sel_sites)
     & data["parameter"].isin(sel_params)
@@ -164,7 +208,7 @@ def kpi_grid():
 
 kpi_grid()
 
-# ================== Tabs ==================
+# ================== Abas ==================
 tab1, tab2, tab3, tab4 = st.tabs(["📈 Tendência", "🏁 Ranking", "🗺️ Mapas", "🚨 Alertas"])
 
 # --- Tendência temporal
@@ -217,7 +261,7 @@ with tab2:
         )
         st.altair_chart(bars, use_container_width=True)
 
-# --- Mapas (força refresh do basemap com id/key + URL variável)
+# --- Mapas (refresh garantido + key seguro)
 with tab3:
     st.markdown('<div class="section-title"><span class="dot"></span> Mapa dos Sites</div>', unsafe_allow_html=True)
     if data.empty:
@@ -231,7 +275,6 @@ with tab3:
             zoom=4, pitch=0,
         )
 
-        # URL com query param para forçar troca de fonte
         esri_url = (
             f"https://server.arcgisonline.com/ArcGIS/rest/services/"
             f"{bm_id}/MapServer/tile/{{z}}/{{y}}/{{x}}?fresh={bm_id}"
@@ -239,8 +282,8 @@ with tab3:
 
         esri_layer = pdk.Layer(
             "TileLayer",
-            id=f"esri-{bm_id}",      # muda quando troca o basemap -> rebuild
-            data=[{"bm": bm_id}],    # payload muda -> deck.gl refaz a layer
+            id=f"esri-{bm_id}",          # muda com o basemap -> rebuild
+            data=[{"bm": bm_id}],        # payload muda -> deck.gl refaz a layer
             get_tile_url=esri_url,
         )
 
@@ -260,7 +303,7 @@ with tab3:
             heat = data[data["parameter"] == "Taxa Metano"].rename(columns={"lon":"longitude","lat":"latitude"})
             heat_layer = pdk.Layer(
                 "HeatmapLayer",
-                id=f"heat-{bm_id}",   # id também muda com o basemap
+                id=f"heat-{bm_id}",
                 data=heat,
                 get_position='[longitude, latitude]',
                 get_weight="value",
@@ -272,10 +315,12 @@ with tab3:
             initial_view_state=view_state,
             layers=layers,
             tooltip={"text": "{site}"},
-            map_style=None,          # evita estilo do Mapbox
+            map_style=None,
         )
-        # key muda com o basemap -> garante rerender no Streamlit
-        st.pydeck_chart(deck, key=f"deck-{bm_id}")
+
+        # 🔧 key sempre como string (evita TypeError)
+        chart_key = "deck-" + str(bm_id) if bm_id else "deck-default"
+        st.pydeck_chart(deck, key=chart_key)
 
 # --- Alertas
 with tab4:
