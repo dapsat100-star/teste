@@ -1,26 +1,25 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
-from datetime import datetime
-import os
+import os, sys, traceback
 
 # ================== Config & CSS ==================
 st.set_page_config(page_title="DAP Atlas – Methane POC", page_icon="🛰️", layout="wide")
 
 def load_css():
-    # tenta assets/styles.css; se não, tenta styles.css na raiz
     for p in ("assets/styles.css", "styles.css"):
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
             return
     # fallback (tema escuro básico)
-    fallback = """
-    .block-container { padding-top: 1.2rem; }
-    body, .stMarkdown, .stText, .stApp { color:#E5E7EB!important; background:#0B1220!important; }
-    section[data-testid="stSidebar"] { background:#121A2B!important; border-right:1px solid rgba(255,255,255,.06); }
-    .topbar {display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,rgba(14,165,164,.12),rgba(14,165,164,.04));
-             border:1px solid rgba(255,255,255,.06); padding:10px 14px; border-radius:14px; margin-bottom:14px;}
+    st.markdown("""
+    <style>
+    .block-container{padding-top:1.2rem}
+    body,.stApp{color:#E5E7EB!important;background:#0B1220!important}
+    section[data-testid="stSidebar"]{background:#121A2B!important;border-right:1px solid rgba(255,255,255,.06)}
+    .topbar{display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,rgba(14,165,164,.12),rgba(14,165,164,.04));
+            border:1px solid rgba(255,255,255,.06);padding:10px 14px;border-radius:14px;margin-bottom:14px}
     .topbar h1{font-size:1.05rem;margin:0;color:#E5E7EB}
     .kpi-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
     .kpi{background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.03));
@@ -32,10 +31,20 @@ def load_css():
     .section-title .dot{width:8px;height:8px;border-radius:50%;background:#0EA5A4;display:inline-block}
     [data-testid="stDataFrame"]{border:1px solid rgba(255,255,255,.08);border-radius:12px;overflow:hidden}
     .footer{margin-top:12px;font-size:.78rem;color:#8FA3B8;border-top:1px dashed rgba(255,255,255,.12);padding-top:8px}
-    """
-    st.markdown(f"<style>{fallback}</style>", unsafe_allow_html=True)
+    </style>
+    """, unsafe_allow_html=True)
 
 load_css()
+
+# ================== Util: diagnóstico ==================
+with st.expander("🔧 Diagnóstico (versões)"):
+    import platform
+    st.write("Python:", sys.version)
+    try:
+        import pandas, pydeck, altair, openpyxl
+        st.write("pandas", pandas.__version__, "| pydeck", pydeck.__version__, "| altair", altair.__version__, "| openpyxl", openpyxl.__version__)
+    except Exception as e:
+        st.write("Erro ao checar versões:", e)
 
 # ================== Load & Transform ==================
 @st.cache_data
@@ -81,20 +90,24 @@ def to_tidy(sheets_dict):
     tidy.sort_values(["site", "parameter", "date"], inplace=True)
     return tidy
 
-# ================== Sidebar ==================
+# ================== Sidebar & Data ==================
 st.sidebar.header("⚙️ Configurações")
 
-default_path = "exemplo banco dados.xlsx"   # se versionou um exemplo
+default_path = "exemplo banco dados.xlsx"   # se você versionou um exemplo
 uploaded = st.sidebar.file_uploader("Suba o Excel (12 abas, mesmo layout)", type=["xlsx"])
-path = uploaded if uploaded is not None else default_path
+path = uploaded if uploaded is not None else (default_path if os.path.exists(default_path) else None)
+
+if path is None:
+    st.info("⬅️ Envie o arquivo .xlsx no sidebar (ou inclua 'exemplo banco dados.xlsx' no repositório).")
+    st.stop()
 
 try:
     sheets_dict = load_excel(path)
-except Exception:
-    st.error("Carregue um arquivo .xlsx no sidebar (mesmo layout do exemplo).")
+    data = to_tidy(sheets_dict)
+except Exception as e:
+    st.error("Falha ao carregar/transformar a planilha.")
+    st.exception(e)
     st.stop()
-
-data = to_tidy(sheets_dict)
 
 sites = sorted(data["site"].unique())
 params = sorted(data["parameter"].unique())
@@ -107,14 +120,14 @@ start, end = st.sidebar.date_input(
     "📅 Intervalo de datas", value=(min_d, max_d), min_value=min_d, max_value=max_d
 )
 
-# basemap selector + ids (usaremos na key/id pra forçar refresh)
+# Basemap selector (ids Esri)
 BASEMAPS = {
     "Esri Streets": "World_Street_Map",
     "Esri Satellite": "World_Imagery",
     "Esri Topo": "World_Topo_Map",
 }
 bm_name = st.sidebar.selectbox("🗺️ Basemap", list(BASEMAPS))
-bm_id = BASEMAPS[bm_name]                  # usado no id/key/URL
+bm_id = BASEMAPS[bm_name]
 show_heat = st.sidebar.checkbox("Heatmap (Taxa Metano)", value=False)
 
 # ================== Filter ==================
@@ -163,13 +176,12 @@ with tab1:
         import altair as alt
         series = data.groupby(["date", "site", "parameter"], as_index=False)["value"].mean()
         use_ma = st.checkbox("Aplicar média móvel (7d)", value=False)
+        y_field = "value"
         if use_ma:
             series["value_ma7"] = series.groupby(["site","parameter"])["value"].transform(
                 lambda s: s.rolling(7, min_periods=1).mean()
             )
             y_field = "value_ma7"
-        else:
-            y_field = "value"
         chart = (
             alt.Chart(series).mark_line()
             .encode(
