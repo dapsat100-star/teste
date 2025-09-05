@@ -1,7 +1,5 @@
 import streamlit as st
 import pandas as pd
-import pydeck as pdk
-import streamlit.components.v1 as components
 import os, time
 
 # ================== Config & CSS ==================
@@ -36,9 +34,6 @@ def load_css():
     """, unsafe_allow_html=True)
 
 load_css()
-
-# ===== Desliga Mapbox como mapa-base (importante) =====
-pdk.settings.mapbox_api_key = ""  # garante que NÃO usa Mapbox
 
 # ================== Utils (parser robusto) ==================
 def _pick_col(df: pd.DataFrame, candidates):
@@ -265,81 +260,61 @@ with tab2:
         )
         st.altair_chart(bars, use_container_width=True)
 
-# --- Mapas (Mapbox OFF + troca garantida com cache-buster) — render HTML standalone
+# --- Mapas (Folium + Esri, sem Mapbox)
 with tab3:
     st.markdown('<div class="section-title"><span class="dot"></span> Mapa dos Sites</div>', unsafe_allow_html=True)
     if data.empty:
         st.info("Seleção sem dados.")
     else:
+        import folium
+        from folium.plugins import HeatMap
+        from streamlit_folium import st_folium
+
+        # Centro do mapa pelos sites
         sites_df = data.groupby(["site", "lat", "lon"], as_index=False).size()
-        view_state = pdk.ViewState(
-            latitude=sites_df["lat"].mean(),
-            longitude=sites_df["lon"].mean(),
-            zoom=4, pitch=0,
-        )
+        center_lat = float(sites_df["lat"].mean())
+        center_lon = float(sites_df["lon"].mean())
 
-        # Cache-buster para trocar o basemap de verdade
-        if "bm_last" not in st.session_state:
-            st.session_state.bm_last = None
-        if "bm_buster" not in st.session_state:
-            st.session_state.bm_buster = "init"
-        if bm_id != st.session_state.bm_last:
-            st.session_state.bm_last = bm_id
-            st.session_state.bm_buster = str(int(time.time()))
-        buster = st.session_state.bm_buster
-
+        # URL dos tiles Esri para o basemap escolhido
         esri_url = (
             f"https://server.arcgisonline.com/ArcGIS/rest/services/"
-            f"{bm_id}/MapServer/tile/{{z}}/{{y}}/{{x}}?fresh={buster}"
+            f"{bm_id}/MapServer/tile/{{z}}/{{y}}/{{x}}"
         )
 
-        esri_layer = pdk.Layer(
-            "TileLayer",
-            id=f"esri-{bm_id}-{buster}",
-            data=[{"bm": bm_id, "b": buster}],
-            get_tile_url=esri_url,
-            minZoom=0, maxZoom=19, opacity=1.0,
-        )
+        # Cria mapa sem tile default e adiciona TileLayer do Esri
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=4, tiles=None, control_scale=True)
+        folium.TileLayer(
+            tiles=esri_url,
+            name=bm_name,
+            attr="Esri",
+            overlay=False,
+            control=True,
+        ).add_to(m)
 
-        points_layer = pdk.Layer(
-            "ScatterplotLayer",
-            id="sites-points",
-            data=sites_df.rename(columns={"lon": "longitude", "lat": "latitude"}),
-            get_position="[longitude, latitude]",
-            get_radius=15000,
-            get_fill_color=[255, 0, 0, 160],
-            pickable=True,
-        )
+        # Pontos dos sites
+        for _, r in sites_df.iterrows():
+            folium.CircleMarker(
+                location=[float(r["lat"]), float(r["lon"])],
+                radius=7,
+                color="#ff4444",
+                fill=True,
+                fill_opacity=0.7,
+                tooltip=str(r["site"]),
+            ).add_to(m)
 
-        layers = [esri_layer, points_layer]
-
+        # Heatmap opcional (usa "Taxa Metano")
         if show_heat and "Taxa Metano" in data["parameter"].unique():
-            heat = data[data["parameter"] == "Taxa Metano"].rename(columns={"lon": "longitude", "lat": "latitude"})
-            heat_layer = pdk.Layer(
-                "HeatmapLayer",
-                id=f"heat-{bm_id}-{buster}",
-                data=heat,
-                get_position='[longitude, latitude]',
-                get_weight="value",
-                radiusPixels=40,
-            )
-            layers = [esri_layer, heat_layer, points_layer]
+            heat_df = data[data["parameter"] == "Taxa Metano"][["lat", "lon", "value"]].dropna()
+            if not heat_df.empty:
+                HeatMap(
+                    data=heat_df[["lat", "lon", "value"]].values.tolist(),
+                    radius=25,
+                    blur=18,
+                    max_zoom=6,
+                ).add_to(m)
 
-        deck = pdk.Deck(
-            initial_view_state=view_state,
-            layers=layers,
-            tooltip={"text": "{site}"},
-            map_provider=None,   # SEM MAPBOX
-            map_style=None,
-        )
-
-        # Render deck.gl como HTML standalone (sem Mapbox)
-        html = deck.to_html(
-            as_string=True,
-            notebook_display=False,
-            iframe_height=560
-        )
-        components.html(html, height=560)
+        folium.LayerControl(collapsed=False).add_to(m)
+        st_folium(m, height=560, use_container_width=True)
 
 # --- Alertas
 with tab4:
@@ -368,4 +343,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.markdown('<div class="footer">© DAP Sistemas Espaciais · Demo POC · deck.gl (TileLayer Esri) renderizado como HTML standalone.</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">© DAP Sistemas Espaciais · Demo POC · Folium + Esri Tiles.</div>', unsafe_allow_html=True)
