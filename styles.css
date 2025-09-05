@@ -1,0 +1,27 @@
+/* ====== Layout geral ====== */
+.block-container { padding-top: 1.2rem; }
+section[data-testid="stSidebar"] { border-right: 1px solid rgba(255,255,255,0.06); }
+/* ====== Topbar ====== */
+.topbar {display: flex; align-items: center; gap: 12px;
+  background: linear-gradient(90deg, rgba(14,165,164,0.12), rgba(14,165,164,0.04));
+  border: 1px solid rgba(255,255,255,0.06);
+  padding: 10px 14px; border-radius: 14px; margin-bottom: 14px;}
+.topbar img { height: 28px; }
+.topbar h1 { font-size: 1.05rem; margin: 0; letter-spacing: .3px; color: #E5E7EB; }
+/* ====== Cards KPI ====== */
+.kpi-row { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
+.kpi {background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03));
+  border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 14px 16px;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.2);}
+.kpi .label { font-size: .80rem; color: #A7B0BF; margin-bottom: 6px; }
+.kpi .value { font-size: 1.4rem; font-weight: 700; color: #F9FAFB; }
+.kpi .sub { font-size: .78rem; color: #8FA3B8; }
+/* ====== Seções ====== */
+.section-title {display: flex; align-items: center; gap: 8px; margin: 18px 0 8px;
+  color: #E5E7EB; font-weight: 600;}
+.section-title .dot {width: 8px; height: 8px; border-radius: 50%; background: #0EA5A4; display: inline-block;}
+/* ====== Tabela ====== */
+[data-testid="stDataFrame"] {border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; overflow: hidden;}
+/* ====== Rodapé ====== */
+.footer {margin-top: 12px; font-size: .78rem; color: #8FA3B8;
+  border-top: 1px dashed rgba(255,255,255,0.12); padding-top: 8px;}
