@@ -319,8 +319,7 @@ with tab3:
         )
 
         # 🔧 key sempre como string (evita TypeError)
-        chart_key = "deck-" + str(bm_id) if bm_id else "deck-default"
-        st.pydeck_chart(deck, key=chart_key)
+        st.pydeck_chart(deck)
 
 # --- Alertas
 with tab4:
