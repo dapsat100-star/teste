@@ -1,578 +1,347 @@
-import streamlit as st
-import pandas as pd
+
+import io
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+from urllib.parse import quote
+
 import numpy as np
-import os, time
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
 
-# ================== Config & CSS ==================
-st.set_page_config(page_title="DAP Atlas – Methane POC", page_icon="🛰️", layout="wide")
+# ===================== CONFIGURE AQUI =====================
+DEFAULT_BASE_URL = "https://raw.githubusercontent.com/dapsat100-star/geoportal/main"
+# =========================================================
 
-def load_css():
-    for p in ("assets/styles.css", "styles.css"):
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-            return
-    # Fallback (tema escuro básico)
-    st.markdown("""
-    <style>
-    .block-container{padding-top:1.2rem}
-    body,.stApp{color:#E5E7EB!important;background:#0B1220!important}
-    section[data-testid="stSidebar"]{background:#121A2B!important;border-right:1px solid rgba(255,255,255,.06)}
-    .topbar{display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,rgba(14,165,164,.12),rgba(14,165,164,.04));
-            border:1px solid rgba(255,255,255,.06);padding:10px 14px;border-radius:14px;margin-bottom:14px}
-    .topbar h1{font-size:1.05rem;margin:0;color:#E5E7EB}
-    .kpi-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-    .kpi{background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.03));
-         border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px 16px;box-shadow:0 6px 22px rgba(0,0,0,.2)}
-    .kpi .label{font-size:.8rem;color:#A7B0BF;margin-bottom:6px}
-    .kpi .value{font-size:1.4rem;font-weight:700;color:#F9FAFB}
-    .kpi .sub{font-size:.78rem;color:#8FA3B8}
-    .section-title{display:flex;align-items:center;gap:8px;margin:18px 0 8px;color:#E5E7EB;font-weight:600}
-    .section-title .dot{width:8px;height:8px;border-radius:50%;background:#0EA5A4;display:inline-block}
-    [data-testid="stDataFrame"]{border:1px solid rgba(255,255,255,.08);border-radius:12px;overflow:hidden}
-    .footer{margin-top:12px;font-size:.78rem;color:#8FA3B8;border-top:1px dashed rgba(255,255,255,.12);padding-top:8px}
-    </style>
-    """, unsafe_allow_html=True)
+try:
+    import folium
+    from streamlit_folium import st_folium
+    HAVE_MAP = True
+except Exception:
+    HAVE_MAP = False
 
-load_css()
+st.set_page_config(page_title="Geoportal — Pro (Séries avançadas)", layout="wide")
+st.title("📷 Geoportal de Metano — Painel Pro (Séries e Estatística)")
 
-# ================== Utils (parser robusto) ==================
-def _pick_col(df: pd.DataFrame, candidates):
-    for c in candidates:
-        if c in df.columns:
-            return c
-    norm = {str(c).strip().lower(): c for c in df.columns}
-    for c in candidates:
-        key = str(c).strip().lower()
-        if key in norm:
-            return norm[key]
-    return None
+with st.sidebar:
+    st.header("📁 Suba o Excel")
+    uploaded = st.file_uploader("Upload do Excel (.xlsx)", type=["xlsx"])
+    st.caption(f"As URLs das figuras serão montadas como `{DEFAULT_BASE_URL}/images/<arquivo>`.")
+    st.markdown("---")
+    st.caption("Dica: mantenha `images/` em minúsculo.")
 
-def _to_float(cell):
-    return float(str(cell).replace(",", ".").strip())
+@st.cache_data
+def read_excel_from_bytes(file_bytes) -> Dict[str, pd.DataFrame]:
+    xls = pd.ExcelFile(file_bytes, engine="openpyxl")
+    return {sn: pd.read_excel(xls, sheet_name=sn, engine="openpyxl") for sn in xls.sheet_names}
 
-# ================== Load & Transform (com cache) ==================
-@st.cache_data(ttl=900, max_entries=4)
-def load_excel(path_or_buffer):
-    xlsx = pd.ExcelFile(path_or_buffer)
-    frames = []
-    for sh in xlsx.sheet_names:
-        df = pd.read_excel(xlsx, sheet_name=sh)
-        frames.append((sh, df))
-    return {sh: df for sh, df in frames}
-
-def parse_sheet(df: pd.DataFrame, site: str) -> pd.DataFrame:
-    lat_col = _pick_col(df, ["Lat", "Latitude", "LAT"])
-    lon_col = _pick_col(df, ["Long", "Lon", "Longitude", "LONG"])
-    if lat_col is None or lon_col is None:
-        raise ValueError(f"Aba '{site}': faltam colunas Lat/Long.")
-
+def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     cols = list(df.columns)
-    start_idx = cols.index("Data") if "Data" in cols else None
-    if start_idx is None:
-        for i, _ in enumerate(cols):
-            cell = df.iloc[0, i] if 0 in df.index else None
-            if pd.to_datetime(cell, errors="coerce") is not pd.NaT:
-                start_idx = i
-                break
-    if start_idx is None:
-        raise ValueError(f"Aba '{site}': não identifiquei as colunas de data.")
+    if cols: cols[0] = "Parametro"
+    normed = []
+    for c in cols:
+        s = str(c).strip()
+        if s.lower() in ("lat","latitude"): normed.append("Lat")
+        elif s.lower() in ("long","lon","longitude"): normed.append("Long")
+        else: normed.append(s)
+    df.columns = normed
+    return df
 
-    date_cols = cols[start_idx:]
-    dates = pd.to_datetime(df.loc[df.index[0], date_cols], errors="coerce")
-    if dates.isna().all():
-        raise ValueError(f"Aba '{site}': cabeçalho de datas inválido.")
-
-    par_col = _pick_col(df, ["Parametro", "Parâmetro", "parametro", "parameter"])
-    if par_col is None:
-        raise ValueError(f"Aba '{site}': não encontrei a coluna de parâmetro.")
-
+def extract_dates_from_first_row(df: pd.DataFrame) -> Tuple[List[str], Dict[str, str], List[pd.Timestamp]]:
+    cols = list(df.columns)
     try:
-        lat = _to_float(df.loc[df.index[0], lat_col])
-        lon = _to_float(df.loc[df.index[0], lon_col])
-    except Exception:
-        raise ValueError(f"Aba '{site}': Lat/Long da linha 0 não numéricos.")
+        data_idx = cols.index("Data")
+    except ValueError:
+        data_idx = 3 if len(cols) > 3 else 0
+    date_cols = cols[data_idx:]
+    pretty = {}
+    dates_ts = []
+    for c in date_cols:
+        v = df.loc[0, c] if 0 in df.index else None
+        label, ts = None, pd.NaT
+        if pd.notna(v):
+            for dayfirst in (True, False):
+                try:
+                    dt = pd.to_datetime(v, dayfirst=dayfirst, errors="raise")
+                    label = dt.strftime("%Y-%m-%d")
+                    ts = pd.to_datetime(label)
+                    break
+                except Exception:
+                    pass
+        if not label:
+            try:
+                dt = pd.to_datetime(str(c), dayfirst=True, errors="raise")
+                label = dt.strftime("%Y-%m")
+                ts = pd.to_datetime(label + "-01", errors="coerce")
+            except Exception:
+                label = str(c)
+                ts = pd.NaT
+        pretty[c] = label
+        dates_ts.append(ts)
+    return date_cols, pretty, dates_ts
 
-    value_rows = df.iloc[1:].copy().reset_index(drop=True)
-    recs = []
-    for _, row in value_rows.iterrows():
-        param = str(row[par_col]).strip()
-        if not param or param.lower() in ("nan", "none"):
-            continue
-        for i, c in enumerate(date_cols):
-            d = dates.iloc[i]
-            v = row.get(c, None)
-            if pd.isna(d) or pd.isna(v):
-                continue
-            recs.append({
-                "site": site, "lat": lat, "lon": lon,
-                "parameter": param, "date": pd.to_datetime(d),
-                "value": pd.to_numeric(str(v).replace(",", "."), errors="coerce"),
-            })
-    out = pd.DataFrame(recs)
-    if out.empty:
-        raise ValueError(f"Aba '{site}': nenhum valor válido após parse.")
-    return out
+def build_record_for_month(df: pd.DataFrame, date_col: str) -> Dict[str, Optional[str]]:
+    dfi = df.copy()
+    if dfi.columns[0] != "Parametro":
+        dfi.columns = ["Parametro"] + list(dfi.columns[1:])
+    dfi["Parametro"] = dfi["Parametro"].astype(str).str.strip()
+    dfi = dfi.set_index("Parametro", drop=True)
+    rec = {param: dfi.loc[param, date_col] for param in dfi.index}
+    lat_val = df["Lat"].dropna().iloc[0] if "Lat" in df.columns and df["Lat"].notna().any() else None
+    lon_val = df["Long"].dropna().iloc[0] if "Long" in df.columns and df["Long"].notna().any() else None
+    rec["_lat"] = lat_val
+    rec["_long"] = lon_val
+    return rec
 
-@st.cache_data(ttl=900, max_entries=4)
-def to_tidy_cached(sheets_dict):
-    parts = []
-    for sh, df in sheets_dict.items():
-        try:
-            parts.append(parse_sheet(df, sh))
-        except Exception as e:
-            st.warning(f"⚠️ {e}")
-    if not parts:
-        raise RuntimeError("Nenhuma aba válida após o parse.")
-    tidy = pd.concat(parts, ignore_index=True)
-    tidy.sort_values(["site", "parameter", "date"], inplace=True)
-    return tidy
+def resolve_image_target(path_str: str) -> Optional[str]:
+    if path_str is None or (isinstance(path_str, float) and pd.isna(path_str)):
+        return None
+    s = str(path_str).strip()
+    if not s: return None
+    s = s.replace("\\","/")
+    if s.startswith("./"): s = s[2:]
+    if s.lower().startswith(("http://","https://")): return s
+    return f"{DEFAULT_BASE_URL.rstrip('/')}/{s.lstrip('/')}"
 
-# ================== Sidebar & Data ==================
-st.sidebar.header("⚙️ Configurações")
+# --- Helpers Série Temporal ---
+def extract_series(dfi: pd.DataFrame, date_cols_sorted, dates_ts_sorted, row_name="Taxa Metano"):
+    idx_map = {i.lower(): i for i in dfi.index}
+    key = idx_map.get(row_name.lower())
+    rows = []
+    if key is not None:
+        for i, col in enumerate(date_cols_sorted):
+            val = dfi.loc[key, col] if col in dfi.columns else None
+            try:
+                num = float(pd.to_numeric(val))
+            except Exception:
+                num = None
+            ts = dates_ts_sorted[i]
+            if pd.notna(num) and pd.notna(ts):
+                rows.append({"date": ts, "value": float(num)})
+    s = pd.DataFrame(rows)
+    if not s.empty:
+        s = s.sort_values("date").reset_index(drop=True)
+    return s
 
-uploaded = st.sidebar.file_uploader("Suba o Excel (12 abas, mesmo layout)", type=["xlsx"])
-default_example = "exemplo banco dados.xlsx"
-if uploaded is None and not os.path.exists(default_example):
-    st.info("⬅️ Envie o arquivo .xlsx no sidebar (ou inclua 'exemplo banco dados.xlsx' no repositório).")
+def resample_series(s: pd.DataFrame, freq: str, agg: str):
+    if s.empty: return s
+    s2 = s.set_index("date").asfreq("D")  # dia a dia, preenchendo buracos como NaN
+    # agregação por frequência desejada
+    if agg == "média": agg_fn = "mean"
+    elif agg == "mediana": agg_fn = "median"
+    elif agg == "máx": agg_fn = "max"
+    elif agg == "mín": agg_fn = "min"
+    else: agg_fn = "mean"
+    s3 = getattr(s2.resample(freq), agg_fn)()
+    s3 = s3.dropna()
+    s3 = s3.reset_index().rename(columns={"date":"date"})
+    return s3
+
+def smooth_series(s: pd.DataFrame, method: str, window: int):
+    if s.empty: return s, None
+    sc = s.copy()
+    if method == "Nenhuma":
+        sc["smooth"] = sc["value"]
+    elif method == "Média móvel":
+        sc["smooth"] = sc["value"].rolling(window=window, min_periods=1).mean()
+    elif method == "Exponencial (EMA)":
+        sc["smooth"] = sc["value"].ewm(span=window, adjust=False).mean()
+    else:
+        sc["smooth"] = sc["value"]
+    return sc, sc["smooth"].std() if "smooth" in sc else None
+
+def filter_outliers(s: pd.DataFrame, method: str):
+    if s.empty: return s
+    sc = s.copy()
+    if method == "Nenhum":
+        return sc
+    if method == "Z-score>3":
+        z = (sc["value"] - sc["value"].mean()) / (sc["value"].std(ddof=0) + 1e-9)
+        sc = sc[abs(z) <= 3.0]
+    elif method == "IQR":
+        q1, q3 = sc["value"].quantile(0.25), sc["value"].quantile(0.75)
+        iqr = q3 - q1
+        lower, upper = q1 - 1.5*iqr, q3 + 1.5*iqr
+        sc = sc[(sc["value"] >= lower) & (sc["value"] <= upper)]
+    return sc
+
+def trendline(x: np.ndarray, y: np.ndarray):
+    if len(x) < 2: return None
+    coeffs = np.polyfit(x, y, 1)
+    line = np.poly1d(coeffs)
+    return coeffs, line
+
+# === Fluxo principal ===
+if uploaded is None:
+    st.info("Faça o upload do seu Excel (`.xlsx`) no painel lateral.")
     st.stop()
-path = uploaded if uploaded is not None else default_example
 
-t0 = time.perf_counter()
-with st.spinner("Carregando planilha..."):
-    sheets_dict = load_excel(path)
-t1 = time.perf_counter()
-with st.spinner("Transformando dados..."):
-    data = to_tidy_cached(sheets_dict)
-t2 = time.perf_counter()
-st.caption(f"⏱️ Tempo: load {t1-t0:.2f}s · transform {t2-t1:.2f}s")
+try:
+    book = read_excel_from_bytes(uploaded)
+except Exception as e:
+    st.error(f"Falha ao ler o Excel enviado. Detalhe: {e}")
+    st.stop()
 
-with st.expander("🧪 Debug – estrutura da planilha"):
-    st.write("Abas:", list(sheets_dict.keys()))
-    for sh, df in list(sheets_dict.items())[:3]:
-        st.write(f"**Aba:** {sh}")
-        st.write("Colunas:", list(df.columns))
-        st.dataframe(df.head(5), use_container_width=True)
+book = {name: normalize_cols(df.copy()) for name, df in book.items()}
 
-# ================== Filtros ==================
-sites = sorted(data["site"].unique())
-params = sorted(data["parameter"].unique())
+# Seleção de site
+site = st.selectbox("Selecione o Site", sorted(book.keys()))
+df_site = book[site]
+date_cols, pretty, dates_ts = extract_dates_from_first_row(df_site)
+order_idx = sorted(range(len(date_cols)), key=lambda i: (pd.Timestamp.min if pd.isna(dates_ts[i]) else dates_ts[i]))
+date_cols_sorted = [date_cols[i] for i in order_idx]
+labels_sorted = [pretty[date_cols[i]] for i in order_idx]
+dates_ts_sorted = [dates_ts[i] for i in order_idx]
 
-sel_sites = st.sidebar.multiselect("🛠️ Sites", sites, default=sites)
-sel_params = st.sidebar.multiselect("📊 Parâmetros", params, default=params)
+# Seleção da data exibida na imagem
+selected_label = st.selectbox("Selecione a data", labels_sorted)
+selected_col = date_cols_sorted[labels_sorted.index(selected_label)]
 
-min_d, max_d = pd.to_datetime(data["date"].min()).date(), pd.to_datetime(data["date"].max()).date()
-start, end = st.sidebar.date_input(
-    "📅 Intervalo de datas", value=(min_d, max_d), min_value=min_d, max_value=max_d
-)
+# ------------------- Painel Superior (Imagem + KPIs) -------------------
+left, right = st.columns([2,1])
 
-BASEMAPS = {
-    "Esri Streets": "World_Street_Map",
-    "Esri Satellite": "World_Imagery",
-    "Esri Topo": "World_Topo_Map",
-}
-bm_name = st.sidebar.selectbox("🗺️ Basemap", list(BASEMAPS))
-bm_id = BASEMAPS[bm_name]  # string
-show_heat = st.sidebar.checkbox("Heatmap (Taxa Metano)", value=False)
-
-filt = (
-    data["site"].isin(sel_sites)
-    & data["parameter"].isin(sel_params)
-    & data["date"].between(pd.to_datetime(start), pd.to_datetime(end))
-)
-data = data.loc[filt].copy()
-
-# ================== Header & KPIs ==================
-st.markdown('<div class="topbar"><h1>DAP Atlas – Methane & Metocean · 12 Sites</h1></div>', unsafe_allow_html=True)
-
-def kpi_grid():
-    obs = f"{len(data):,}".replace(",", ".")
-    nsites = f"{data['site'].nunique():,}".replace(",", ".")
-    nparams = f"{data['parameter'].nunique():,}".replace(",", ".")
-    last_date = data["date"].max() if not data.empty else None
-    last_txt = pd.to_datetime(last_date).date().isoformat() if last_date is not None else "-"
-
-    st.markdown('<div class="kpi-row">', unsafe_allow_html=True)
-    for label, value, sub in [
-        ("Observações", obs, "No período selecionado"),
-        ("Sites ativos", nsites, "Com dados no filtro"),
-        ("Parâmetros", nparams, "Métricas monitoradas"),
-        ("Última data", last_txt, "Atualização do dataset"),
-    ]:
-        st.markdown(
-            f'<div class="kpi"><div class="label">{label}</div>'
-            f'<div class="value">{value}</div><div class="sub">{sub}</div></div>',
-            unsafe_allow_html=True,
-        )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-kpi_grid()
-
-# ================== Abas ==================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Tendência", "🏁 Ranking", "🗺️ Mapas", "🚨 Alertas", "🔗 Correlação"])
-
-# --- 📈 Tendência temporal (com ferramentas estatísticas)
-with tab1:
-    st.markdown('<div class="section-title"><span class="dot"></span> Série temporal (ferramentas estatísticas)</div>', unsafe_allow_html=True)
-    if data.empty:
-        st.info("Seleção sem dados.")
+with left:
+    rec = build_record_for_month(df_site, selected_col)
+    img = resolve_image_target(rec.get("Imagem"))
+    st.subheader(f"Imagem — {site} — {selected_label}")
+    if img:
+        st.image(img, use_container_width=True)
     else:
-        import altair as alt
+        st.error("Imagem não encontrada para essa data.")
 
-        # ---------------- UI (controles) ----------------
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            freq = st.selectbox("Frequência", ["Diário", "Semanal", "Mensal"], index=0)
-            agg_fun = st.selectbox("Agregação", ["média", "mediana", "máximo", "mínimo"], index=0)
-        with c2:
-            smooth_type = st.selectbox("Suavização", ["Nenhuma", "SMA (média móvel)", "EWMA (exponencial)"], index=0)
-            win = st.slider("Janela/Span", min_value=3, max_value=60, value=7, step=1)
-        with c3:
-            outlier_filter = st.selectbox("Filtro de outliers", ["Nenhum", "Z-score", "IQR"], index=0)
-            band_type = st.selectbox("Bandas", ["Nenhuma", "Confiança (±k·σ)", "Quantis (p10–p90)"], index=0)
+    if HAVE_MAP and (rec.get("_lat") is not None and rec.get("_long") is not None):
+        with st.expander("🗺️ Mostrar mapa (opcional)", expanded=False):
+            m = folium.Map(location=[float(rec["_lat"]), float(rec["_long"])], zoom_start=13, tiles="OpenStreetMap")
+            folium.Marker([float(rec["_lat"]), float(rec["_long"])], tooltip=site).add_to(m)
+            st_folium(m, height=400, use_container_width=True)
 
-        k_sigma = st.slider("k (para banda de confiança)", 1.0, 4.0, 2.0, 0.5)
-        show_trend = st.checkbox("Mostrar tendência linear", value=False)
-        normalize = st.checkbox("Normalizar pela linha base (primeira janela)", value=False)
-        mark_anoms = st.checkbox("Marcar anomalias (acima de banda)", value=False)
+with right:
+    st.subheader("Detalhes do Registro")
+    dfi = df_site.copy()
+    if dfi.columns[0] != "Parametro":
+        dfi.columns = ["Parametro"] + list(dfi.columns[1:])
+    dfi["Parametro"] = dfi["Parametro"].astype(str).str.strip()
+    dfi = dfi.set_index("Parametro", drop=True)
 
-        # ---------------- Prep (agrupamento) ----------------
-        freq_code = {"Diário": "D", "Semanal": "W", "Mensal": "M"}[freq]
-        agg_map = {"média": "mean", "mediana": "median", "máximo": "max", "mínimo": "min"}
-        f_agg = agg_map[agg_fun]
+    def getv(name):
+        for cand in (name, name.capitalize(), name.title(), name.replace("ç","c").replace("á","a")):
+            if cand in dfi.index:
+                return dfi.loc[cand, selected_col]
+        return None
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Taxa Metano", f"{getv('Taxa Metano')}" if pd.notna(getv('Taxa Metano')) else "—")
+    k2.metric("Incerteza", f"{getv('Incerteza')}" if pd.notna(getv('Incerteza')) else "—")
+    k3.metric("Vento", f"{getv('Velocidade do Vento')}" if pd.notna(getv('Velocidade do Vento')) else "—")
 
-        base = data[["date", "site", "parameter", "value"]].copy()
-        base["date"] = pd.to_datetime(base["date"])
+    st.markdown("---")
+    st.caption("Tabela completa (parâmetro → valor):")
+    show_df = dfi[[selected_col]].copy()
+    show_df.columns = ["Valor"]
+    if "Imagem" in show_df.index: show_df = show_df.drop(index="Imagem")
+    show_df = show_df.applymap(lambda v: "" if (pd.isna(v)) else str(v))
+    st.dataframe(show_df, use_container_width=True)
 
-        series = (
-            base.set_index("date")
-            .groupby(["site", "parameter"])
-            .resample(freq_code)["value"]
-            .agg(f_agg)
-            .reset_index()
-            .dropna(subset=["value"])
-        )
+# ------------------- Painel Estatístico Avançado -------------------
+st.markdown("### 🧪 Série temporal (ferramentas estatísticas)")
 
-        # ---------------- Filtro de outliers ----------------
-        if outlier_filter != "Nenhum":
-            def _filter_group(g):
-                x = g["value"].astype(float)
-                if outlier_filter == "Z-score":
-                    mu, sigma = x.mean(), x.std(ddof=0)
-                    if sigma == 0 or np.isnan(sigma):
-                        return g
-                    z = (x - mu) / sigma
-                    return g.loc[z.abs() <= 3]
-                else:  # IQR
-                    q1, q3 = x.quantile(0.25), x.quantile(0.75)
-                    iqr = q3 - q1
-                    lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-                    return g.loc[(x >= lo) & (x <= hi)]
-            series = series.groupby(["site", "parameter"], group_keys=False).apply(_filter_group)
+c1, c2, c3 = st.columns(3)
+with c1:
+    freq = st.selectbox("Frequência", ["Diário","Semanal","Mensal","Trimestral"], index=1)
+with c2:
+    smooth = st.selectbox("Suavização", ["Nenhuma","Média móvel","Exponencial (EMA)"])
+with c3:
+    out_filter = st.selectbox("Filtro de outliers", ["Nenhum","Z-score>3","IQR"])
 
-        # ---------------- Suavização ----------------
-        y_col = "value"
-        if smooth_type == "SMA (média móvel)":
-            series["value_sma"] = (
-                series.groupby(["site", "parameter"])["value"]
-                .transform(lambda s: s.rolling(win, min_periods=1).mean())
-            )
-            y_col = "value_sma"
-        elif smooth_type == "EWMA (exponencial)":
-            series["value_ewm"] = (
-                series.groupby(["site", "parameter"])["value"]
-                .transform(lambda s: s.ewm(span=win, adjust=False).mean())
-            )
-            y_col = "value_ewm"
+c4, c5, c6 = st.columns(3)
+with c4:
+    agg = st.selectbox("Agregação", ["média","mediana","máx","mín"])
+with c5:
+    window = st.slider("Janela/Span", min_value=3, max_value=60, value=7, step=1)
+with c6:
+    band_type = st.selectbox("Bandas", ["Nenhuma","±k·desvio","Percentis 10/90"])
 
-        # ---------------- Bandas ----------------
-        band_lo, band_hi = None, None
-        if band_type == "Confiança (±k·σ)":
-            roll_mean = series.groupby(["site","parameter"])["value"].transform(
-                lambda s: s.rolling(win, min_periods=2).mean()
-            )
-            roll_std = series.groupby(["site","parameter"])["value"].transform(
-                lambda s: s.rolling(win, min_periods=2).std(ddof=0)
-            )
-            series["band_lo"] = roll_mean - k_sigma * roll_std
-            series["band_hi"] = roll_mean + k_sigma * roll_std
-            band_lo, band_hi = "band_lo", "band_hi"
+k = st.slider("k (para banda de confiança)", min_value=1.0, max_value=4.0, value=2.0, step=0.25)
 
-        elif band_type == "Quantis (p10–p90)":
-            def _quant_bands(g):
-                s = g["value"]
-                q10 = s.rolling(win, min_periods=2).quantile(0.10)
-                q90 = s.rolling(win, min_periods=2).quantile(0.90)
-                g["band_lo"] = q10
-                g["band_hi"] = q90
-                return g
-            series = series.groupby(["site","parameter"], group_keys=False).apply(_quant_bands)
-            band_lo, band_hi = "band_lo", "band_hi"
+col_opts = st.columns(3)
+with col_opts[0]:
+    show_trend = st.checkbox("Mostrar tendência linear")
+with col_opts[1]:
+    normalize_base = st.checkbox("Normalizar pela linha base (primeira janela)")
+with col_opts[2]:
+    mark_anom = st.checkbox("Marcar anomalias (acima de banda)")
 
-        # ---------------- Normalização (linha base) ----------------
-        if normalize:
-            def _norm(g):
-                base_val = g[y_col].iloc[:max(1, min(len(g), win))].mean()
-                g[y_col] = g[y_col] - base_val
-                if band_lo and band_hi:
-                    g[band_lo] = g[band_lo] - base_val
-                    g[band_hi] = g[band_hi] - base_val
-                return g
-            series = series.groupby(["site","parameter"], group_keys=False).apply(_norm)
+# Mapeia frequência
+freq_map = {"Diário":"D","Semanal":"W","Mensal":"M","Trimestral":"Q"}
+series_raw = extract_series(dfi, date_cols_sorted, dates_ts_sorted)
+series = resample_series(series_raw, freq_map[freq], agg)
+series = filter_outliers(series, out_filter)
+series, sigma = smooth_series(series, smooth, window)
 
-        # ---------------- Tendência linear ----------------
-        trend_df = None
-        if show_trend:
-            rows = []
-            for (sname, par), g in series.groupby(["site","parameter"]):
-                g2 = g.dropna(subset=[y_col]).copy()
-                if g2.empty:
-                    continue
-                x = (g2["date"] - g2["date"].min()).dt.total_seconds() / 86400.0
-                y = g2[y_col].values.astype(float)
-                if len(g2) >= 2:
-                    a, b = np.polyfit(x, y, 1)  # y = a*x + b
-                    y_fit = a * x + b
-                    g2["trend"] = y_fit
-                    rows.append(g2[["date","trend"]].assign(site=sname, parameter=par))
-            if rows:
-                trend_df = pd.concat(rows, ignore_index=True)
+# Normalização opcional
+if normalize_base and not series.empty:
+    base = series["smooth"].iloc[:window].mean()
+    if pd.notna(base) and base != 0:
+        series["smooth"] = series["smooth"] / base
 
-        # ---------------- Anomalias (fora da banda) ----------------
-        anoms = None
-        if (mark_anoms and band_lo and band_hi):
-            anoms = series[(series[y_col] > series[band_hi]) | (series[y_col] < series[band_lo])]
+# Plot
+fig, ax = plt.subplots()
+ax.plot(series["date"], series["smooth"], marker="o", linewidth=2)
+ax.set_xlabel("date"); ax.set_ylabel("Valor"); ax.grid(True, linestyle="--", alpha=0.3)
 
-        # ---------------- Gráfico Altair ----------------
-        base_chart = alt.Chart(series).mark_line().encode(
-            x="date:T",
-            y=alt.Y(f"{y_col}:Q", title="Valor"),
-            color="site:N",
-            tooltip=["site","parameter","date:T", alt.Tooltip(y_col, type="quantitative", title="valor")]
-        ).properties(height=360)
+# Bandas
+if band_type != "Nenhuma" and not series.empty:
+    if band_type == "±k·desvio":
+        mu = series["smooth"].mean()
+        std = series["smooth"].std(ddof=0)
+        upper = mu + k*std
+        lower = mu - k*std
+    else:  # Percentis 10/90
+        lower = series["smooth"].quantile(0.10)
+        upper = series["smooth"].quantile(0.90)
+    ax.fill_between(series["date"], lower, upper, alpha=0.15)
 
-        if band_lo and band_hi:
-            band_area = alt.Chart(series).mark_area(opacity=0.18).encode(
-                x="date:T",
-                y=f"{band_lo}:Q",
-                y2=f"{band_hi}:Q",
-                color="site:N"
-            )
-            chart = (band_area + base_chart).interactive()
-        else:
-            chart = base_chart.interactive()
+# Tendência linear
+if show_trend and not series.empty:
+    x = (series["date"] - series["date"].min()).dt.days.values.astype(float)
+    y = series["smooth"].values.astype(float)
+    res = trendline(x, y)
+    if res:
+        coeffs, line = res
+        ax.plot(series["date"], line(x), linestyle="--")
 
-        if trend_df is not None and not trend_df.empty:
-            trend_chart = alt.Chart(trend_df).mark_line(strokeDash=[6,3]).encode(
-                x="date:T", y="trend:Q", color="site:N"
-            )
-            chart = (chart + trend_chart)
-
-        if anoms is not None and not anoms.empty:
-            points = alt.Chart(anoms).mark_point(size=60).encode(
-                x="date:T", y=f"{y_col}:Q", color="site:N",
-                tooltip=["site","parameter","date:T", y_col]
-            )
-            chart = (chart + points)
-
-        st.altair_chart(chart, use_container_width=True)
-
-        st.markdown("**Resumo estatístico por (site, parâmetro)**")
-        summary = (
-            series.groupby(["site","parameter"])[y_col]
-            .agg(n="count", mean="mean", median="median", std="std")
-            .reset_index()
-        )
-        summary["cv_%"] = (summary["std"] / summary["mean"]).replace([np.inf, -np.inf], np.nan) * 100
-        st.dataframe(summary, use_container_width=True)
-
-# --- 🏁 Ranking
-with tab2:
-    st.markdown('<div class="section-title"><span class="dot"></span> Ranking por métrica</div>', unsafe_allow_html=True)
-    if data.empty:
-        st.info("Seleção sem dados.")
+# Marcar anomalias
+if mark_anom and band_type != "Nenhuma" and not series.empty:
+    yy = series["smooth"]
+    if band_type == "±k·desvio":
+        mu = yy.mean(); std = yy.std(ddof=0); up = mu + k*std
     else:
-        import altair as alt
-        metric = st.selectbox("Métrica", sorted(data["parameter"].unique()))
-        rank = (
-            data[data["parameter"] == metric]
-            .groupby("site", as_index=False)["value"]
-            .agg(media="mean", mediana="median", desvio="std", n="count")
-            .sort_values("media", ascending=False)
-        )
-        rank["cv_%"] = (rank["desvio"] / rank["media"]).replace([np.inf, -np.inf], np.nan) * 100
-        st.dataframe(rank, use_container_width=True)
-        bars = (
-            alt.Chart(rank).mark_bar()
-            .encode(
-                x=alt.X("media:Q", title="Média no período"),
-                y=alt.Y("site:N", sort="-x"),
-                tooltip=["site","media","mediana","desvio","cv_%","n"],
-            ).properties(height=420)
-        )
-        st.altair_chart(bars, use_container_width=True)
+        up = yy.quantile(0.90)
+    anom = series[yy > up]
+    ax.scatter(anom["date"], anom["smooth"], s=40)
 
-# --- 🗺️ Mapas (Folium + Esri, sem Mapbox)
-with tab3:
-    st.markdown('<div class="section-title"><span class="dot"></span> Mapa dos Sites</div>', unsafe_allow_html=True)
-    if data.empty:
-        st.info("Seleção sem dados.")
-    else:
-        import folium
-        from folium.plugins import HeatMap
-        from streamlit_folium import st_folium
+# Rotulos
+for t in ax.get_xticklabels():
+    t.set_rotation(30); t.set_ha("right")
 
-        sites_df = data.groupby(["site", "lat", "lon"], as_index=False).size()
-        center_lat = float(sites_df["lat"].mean())
-        center_lon = float(sites_df["lon"].mean())
+st.pyplot(fig)
 
-        esri_url = (
-            f"https://server.arcgisonline.com/ArcGIS/rest/services/"
-            f"{bm_id}/MapServer/tile/{{z}}/{{y}}/{{x}}"
-        )
+# --- Boxplots por mês (um único gráfico limpo) ---
+st.markdown("### Boxplots por mês + média mensal")
+if not series_raw.empty:
+    dfm = series_raw.copy()
+    dfm["month"] = dfm["date"].dt.to_period("M").dt.to_timestamp()
+    groups = dfm.groupby("month")["value"].apply(list).reset_index()
+    months = groups["month"].tolist()
+    positions = list(range(1, len(months)+1))
+    means = [np.mean(v) if len(v)>0 else np.nan for v in groups["value"]]
 
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=4, tiles=None, control_scale=True)
-        folium.TileLayer(
-            tiles=esri_url,
-            name=bm_name,
-            attr="Esri",
-            overlay=False,
-            control=True,
-        ).add_to(m)
-
-        for _, r in sites_df.iterrows():
-            folium.CircleMarker(
-                location=[float(r["lat"]), float(r["lon"])],
-                radius=7,
-                color="#ff4444",
-                fill=True,
-                fill_opacity=0.7,
-                tooltip=str(r["site"]),
-            ).add_to(m)
-
-        if show_heat and "Taxa Metano" in data["parameter"].unique():
-            heat_df = data[data["parameter"] == "Taxa Metano"][["lat", "lon", "value"]].dropna()
-            if not heat_df.empty:
-                HeatMap(
-                    data=heat_df[["lat", "lon", "value"]].values.tolist(),
-                    radius=25,
-                    blur=18,
-                    max_zoom=6,
-                ).add_to(m)
-
-        folium.LayerControl(collapsed=False).add_to(m)
-        st_folium(m, height=560, use_container_width=True)
-
-# --- 🚨 Alertas
-# --- 🚨 Alertas
-with tab4:
-    st.markdown('<div class="section-title"><span class="dot"></span> Regras de alerta</div>', unsafe_allow_html=True)
-
-    if data.empty:
-        st.info("Seleção sem dados.")
-    else:
-        limiar = st.number_input("Limiar de Taxa Metano", value=50.0, step=1.0)
-        consecutivos = st.slider("Pontos consecutivos acima do limiar (histerese)", 1, 5, 1, 1)
-
-        # 1) Garante que a métrica existe no filtro atual
-        if "Taxa Metano" not in set(data["parameter"].unique()):
-            st.info("Não há registros de **Taxa Metano** no recorte selecionado.")
-        else:
-            # 2) Base ordenada por site/data
-            base = (
-                data[data["parameter"] == "Taxa Metano"]
-                .sort_values(["site", "date"])
-                .loc[:, ["site", "date", "value"]]
-                .copy()
-            )
-
-            if base.empty:
-                st.success("Nenhum alerta no momento ✅")
-            else:
-                # 3) Conta streaks por site com retorno sempre contendo 'streak'
-                def _consec(g):
-                    acima = (g["value"] >= float(limiar)).astype(int).to_list()
-                    streak = []
-                    c = 0
-                    for v in acima:
-                        c = c + 1 if v == 1 else 0
-                        streak.append(c)
-                    return g.assign(acima=acima, streak=streak)
-
-                ult = base.groupby("site", group_keys=False).apply(_consec)
-
-                # 4) Se por algum motivo ainda estiver vazio, termina limpo
-                if ult.empty or "streak" not in ult.columns:
-                    st.success("Nenhum alerta no momento ✅")
-                else:
-                    # Considera o último ponto de cada site que atingiu o limiar de consecutivos
-                    atingiu = ult[ult["streak"] >= int(consecutivos)]
-                    if atingiu.empty:
-                        st.success("Nenhum alerta no momento ✅")
-                    else:
-                        alertas = (
-                            atingiu.groupby("site", as_index=False)
-                            .tail(1)[["site", "value", "date"]]
-                            .sort_values("value", ascending=False)
-                        )
-                        st.error(f"{len(alertas)} site(s) acima do limiar")
-                        st.dataframe(alertas, use_container_width=True)
-
-
-# --- 🔗 Correlação
-with tab5:
-    st.markdown('<div class="section-title"><span class="dot"></span> Correlação entre métricas</div>', unsafe_allow_html=True)
-    if data.empty:
-        st.info("Seleção sem dados.")
-    else:
-        import altair as alt
-
-        mode = st.radio("Escopo", ["Global (todos os sites)", "Por site"], horizontal=True)
-        if mode == "Global (todos os sites)":
-            dfp = (data.groupby(["date","parameter"])["value"].mean().reset_index()
-                      .pivot(index="date", columns="parameter", values="value"))
-        else:
-            site_sel = st.selectbox("Site", sorted(data["site"].unique()))
-            dfp = (data[data["site"] == site_sel]
-                   .pivot_table(index="date", columns="parameter", values="value", aggfunc="mean"))
-        dfp = dfp.dropna(how="any")
-
-        if dfp.shape[1] < 2 or dfp.empty:
-            st.info("Dados insuficientes para correlação.")
-        else:
-            corr = dfp.corr(method="pearson")
-            corr_reset = corr.reset_index().melt(id_vars=corr.index.name, var_name="param2", value_name="corr")
-            corr_reset.rename(columns={corr.index.name: "param1"}, inplace=True)
-
-            heat = alt.Chart(corr_reset).mark_rect().encode(
-                x=alt.X("param1:N", sort=list(dfp.columns)),
-                y=alt.Y("param2:N", sort=list(dfp.columns)),
-                tooltip=["param1","param2", alt.Tooltip("corr:Q", format=".2f")],
-                color=alt.Color("corr:Q", scale=alt.Scale(scheme="redblue"), title="ρ")
-            ).properties(height=360)
-            st.altair_chart(heat, use_container_width=True)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                pX = st.selectbox("Parâmetro (eixo X)", list(dfp.columns))
-            with c2:
-                pY = st.selectbox("Parâmetro (eixo Y)", [c for c in dfp.columns if c != pX])
-
-            scat = (dfp[[pX,pY]].dropna().reset_index()
-                    .rename(columns={pX:"x", pY:"y"}))
-            sc = alt.Chart(scat).mark_circle().encode(
-                x=alt.X("x:Q", title=pX),
-                y=alt.Y("y:Q", title=pY),
-                tooltip=["date:T","x:Q","y:Q"]
-            ).properties(height=360).interactive()
-            st.altair_chart(sc, use_container_width=True)
-
-# --- Export
-st.download_button(
-    "⬇️ Baixar CSV filtrado (seleção atual)",
-    data.to_csv(index=False).encode("utf-8"),
-    file_name="dashboard_selecao.csv",
-    mime="text/csv",
-)
-
-st.markdown('<div class="footer">© DAP Sistemas Espaciais · Demo POC · Folium + Esri Tiles.</div>', unsafe_allow_html=True)
+    fig2, ax2 = plt.subplots()
+    ax2.boxplot(groups["value"].tolist(), positions=positions)
+    ax2.plot(positions, means, marker="o", linewidth=2)
+    ax2.set_xlabel("Mês"); ax2.set_ylabel("Taxa de Metano")
+    ax2.set_xticks(positions)
+    ax2.set_xticklabels([m.strftime("%Y-%m") for m in months], rotation=30, ha="right")
+    ax2.grid(True, linestyle="--", alpha=0.3)
+    st.pyplot(fig2)
+else:
+    st.info("Sem dados suficientes para boxpl
